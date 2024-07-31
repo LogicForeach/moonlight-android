@@ -2,6 +2,7 @@ package com.limelight.binding.input.touch;
 
 import android.os.Handler;
 import android.os.Looper;
+import android.util.Log;
 import android.view.View;
 
 import com.limelight.nvstream.NvConnection;
@@ -11,6 +12,8 @@ import com.limelight.preferences.PreferenceConfiguration;
 public class RelativeTouchContext implements TouchContext {
     private int lastTouchX = 0;
     private int lastTouchY = 0;
+    private int lastCursorLocationX = 0;
+    private int lastCursorLocationY = 0;
     private int originalTouchX = 0;
     private int originalTouchY = 0;
     private long originalTouchTime = 0;
@@ -84,7 +87,7 @@ public class RelativeTouchContext implements TouchContext {
             }
     };
 
-    private static final int TAP_MOVEMENT_THRESHOLD = 20;
+    private static final int TAP_MOVEMENT_THRESHOLD = 40;
     private static final int TAP_DISTANCE_THRESHOLD = 25;
     private static final int TAP_TIME_THRESHOLD = 250;
     private static final int DRAG_TIME_THRESHOLD = 650;
@@ -118,7 +121,7 @@ public class RelativeTouchContext implements TouchContext {
                 yDelta <= TAP_MOVEMENT_THRESHOLD;
     }
 
-    private boolean isTap(long eventTime)
+    private boolean isTap(int eventX, int eventY, long eventTime)
     {
         if (confirmedDrag || confirmedMove || confirmedScroll) {
             return false;
@@ -132,7 +135,7 @@ public class RelativeTouchContext implements TouchContext {
         }
 
         long timeDelta = eventTime - originalTouchTime;
-        return isWithinTapBounds(lastTouchX, lastTouchY) && timeDelta <= TAP_TIME_THRESHOLD;
+        return isWithinTapBounds(eventX, eventY) && timeDelta <= TAP_TIME_THRESHOLD;
     }
 
     private byte getMouseButtonIndex()
@@ -148,6 +151,7 @@ public class RelativeTouchContext implements TouchContext {
     @Override
     public boolean touchDownEvent(int eventX, int eventY, long eventTime, boolean isNewFinger)
     {
+        Log.d("TAG", "touchDownEvent() called with: eventX = [" + eventX + "], eventY = [" + eventY + "], eventTime = [" + eventTime + "], isNewFinger = [" + isNewFinger + "]");
         // Get the view dimensions to scale inputs on this touch
         xFactor = referenceWidth / (double)targetView.getWidth();
         yFactor = referenceHeight / (double)targetView.getHeight();
@@ -173,6 +177,7 @@ public class RelativeTouchContext implements TouchContext {
     @Override
     public void touchUpEvent(int eventX, int eventY, long eventTime)
     {
+        Log.d("TAG", "touchUpEvent() called with: eventX = [" + eventX + "], eventY = [" + eventY + "], eventTime = [" + eventTime + "]");
         if (cancelled) {
             return;
         }
@@ -185,9 +190,8 @@ public class RelativeTouchContext implements TouchContext {
         if (confirmedDrag) {
             // Raise the button after a drag
             conn.sendMouseButtonUp(buttonIndex);
-        }
-        else if (isTap(eventTime))
-        {
+        } else if (isTap(lastCursorLocationX, lastCursorLocationY, eventTime)
+                || actionIndex == 1 && isTap(lastTouchX, lastTouchY, eventTime)) {
             // Lower the mouse button
             conn.sendMouseButtonDown(buttonIndex);
 
@@ -196,6 +200,8 @@ public class RelativeTouchContext implements TouchContext {
             Runnable buttonUpRunnable = buttonUpRunnables[buttonIndex - 1];
             handler.removeCallbacks(buttonUpRunnable);
             handler.postDelayed(buttonUpRunnable, 100);
+        } else if (actionIndex == 0) {
+            updatePosition(eventX, eventY);
         }
     }
 
@@ -271,16 +277,18 @@ public class RelativeTouchContext implements TouchContext {
                         conn.sendMouseHighResScroll((short)(deltaY * SCROLL_SPEED_FACTOR));
                     }
                 } else {
-                    if (prefConfig.absoluteMouseMode) {
-                        conn.sendMouseMoveAsMousePosition(
-                                (short) deltaX,
-                                (short) deltaY,
-                                (short) targetView.getWidth(),
-                                (short) targetView.getHeight());
-                    }
-                    else {
-                        conn.sendMouseMove((short) deltaX, (short) deltaY);
-                    }
+//                    if (prefConfig.absoluteMouseMode) {
+//                        conn.sendMouseMoveAsMousePosition(
+//                                (short) deltaX,
+//                                (short) deltaY,
+//                                (short) targetView.getWidth(),
+//                                (short) targetView.getHeight());
+//                    }
+//                    else {
+//                        conn.sendMouseMove((short) deltaX, (short) deltaY);
+//                    }
+                    updatePosition(eventX,eventY);
+
                 }
 
                 // If the scaling factor ended up rounding deltas to zero, wait until they are
@@ -300,6 +308,20 @@ public class RelativeTouchContext implements TouchContext {
         }
 
         return true;
+    }
+
+    private void updatePosition(int eventX, int eventY) {
+        // We may get values slightly outside our view region on ACTION_HOVER_ENTER and ACTION_HOVER_EXIT.
+        // Normalize these to the view size. We can't just drop them because we won't always get an event
+        // right at the boundary of the view, so dropping them would result in our cursor never really
+        // reaching the sides of the screen.
+        eventX = Math.min(Math.max(eventX, 0), targetView.getWidth());
+        eventY = Math.min(Math.max(eventY, 0), targetView.getHeight());
+
+        lastCursorLocationX = eventX;
+        lastCursorLocationY = eventY;
+
+        conn.sendMousePosition((short)eventX, (short)eventY, (short)targetView.getWidth(), (short)targetView.getHeight());
     }
 
     @Override

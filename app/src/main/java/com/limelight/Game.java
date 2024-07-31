@@ -1989,8 +1989,10 @@ public class Game extends Activity implements SurfaceHolder.Callback,
                     yOffset = -streamView.getY();
                 }
                 else {
-                    xOffset = 0.f;
-                    yOffset = 0.f;
+//                    xOffset = 0.f;
+//                    yOffset = 0.f;
+                    xOffset = -streamView.getX();
+                    yOffset = -streamView.getY();
                 }
 
                 int actionIndex = event.getActionIndex();
