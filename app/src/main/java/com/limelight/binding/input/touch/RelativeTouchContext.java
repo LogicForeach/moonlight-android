@@ -2,6 +2,7 @@ package com.limelight.binding.input.touch;
 
 import android.os.Handler;
 import android.os.Looper;
+import android.util.Log;
 import android.view.View;
 
 import com.limelight.nvstream.NvConnection;
@@ -11,6 +12,8 @@ import com.limelight.preferences.PreferenceConfiguration;
 public class RelativeTouchContext implements TouchContext {
     private int lastTouchX = 0;
     private int lastTouchY = 0;
+    private int lastCursorLocationX = 0;
+    private int lastCursorLocationY = 0;
     private int originalTouchX = 0;
     private int originalTouchY = 0;
     private long originalTouchTime = 0;
@@ -18,6 +21,9 @@ public class RelativeTouchContext implements TouchContext {
     private boolean confirmedMove;
     private boolean confirmedDrag;
     private boolean confirmedScroll;
+    private boolean confirmedLongPress;
+    private boolean hasMultiTouch;
+    private boolean touchOnCursor;
     private double distanceMoved;
     private double xFactor, yFactor;
     private int pointerCount;
@@ -31,22 +37,18 @@ public class RelativeTouchContext implements TouchContext {
     private final PreferenceConfiguration prefConfig;
     private final Handler handler;
 
-    private final Runnable dragTimerRunnable = new Runnable() {
+    private static final int LONG_PRESS_TIME_THRESHOLD = 650;
+
+    private final Runnable longPressRunnable = new Runnable() {
         @Override
         public void run() {
-            // Check if someone already set move
-            if (confirmedMove) {
-                return;
-            }
+            conn.sendMouseButtonDown(MouseButtonPacket.BUTTON_RIGHT);
 
-            // The drag should only be processed for the primary finger
-            if (actionIndex != maxPointerCountInGesture - 1) {
-                return;
-            }
+            confirmedLongPress = true;
 
-            // We haven't been cancelled before the timer expired so begin dragging
-            confirmedDrag = true;
-            conn.sendMouseButtonDown(getMouseButtonIndex());
+            Runnable buttonUpRunnable = buttonUpRunnables[MouseButtonPacket.BUTTON_RIGHT - 1];
+            handler.removeCallbacks(buttonUpRunnable);
+            handler.postDelayed(buttonUpRunnable, 100);
         }
     };
 
@@ -84,12 +86,11 @@ public class RelativeTouchContext implements TouchContext {
             }
     };
 
-    private static final int TAP_MOVEMENT_THRESHOLD = 20;
-    private static final int TAP_DISTANCE_THRESHOLD = 25;
+    private static final int TAP_MOVEMENT_THRESHOLD = 50;
+    private static final int TAP_DISTANCE_THRESHOLD = 50;
     private static final int TAP_TIME_THRESHOLD = 250;
-    private static final int DRAG_TIME_THRESHOLD = 650;
 
-    private static final int SCROLL_SPEED_FACTOR = 5;
+    private static final int SCROLL_SPEED_FACTOR = 1;
 
     public RelativeTouchContext(NvConnection conn, int actionIndex,
                                 int referenceWidth, int referenceHeight,
@@ -118,7 +119,7 @@ public class RelativeTouchContext implements TouchContext {
                 yDelta <= TAP_MOVEMENT_THRESHOLD;
     }
 
-    private boolean isTap(long eventTime)
+    private boolean isTap(int eventX, int eventY, long eventTime)
     {
         if (confirmedDrag || confirmedMove || confirmedScroll) {
             return false;
@@ -132,7 +133,7 @@ public class RelativeTouchContext implements TouchContext {
         }
 
         long timeDelta = eventTime - originalTouchTime;
-        return isWithinTapBounds(lastTouchX, lastTouchY) && timeDelta <= TAP_TIME_THRESHOLD;
+        return isWithinTapBounds(eventX, eventY) && timeDelta <= TAP_TIME_THRESHOLD;
     }
 
     private byte getMouseButtonIndex()
@@ -148,6 +149,7 @@ public class RelativeTouchContext implements TouchContext {
     @Override
     public boolean touchDownEvent(int eventX, int eventY, long eventTime, boolean isNewFinger)
     {
+        Log.d("TAG", "touchDownEvent() called with: eventX = [" + eventX + "], eventY = [" + eventY + "], eventTime = [" + eventTime + "], isNewFinger = [" + isNewFinger + "]");
         // Get the view dimensions to scale inputs on this touch
         xFactor = referenceWidth / (double)targetView.getWidth();
         yFactor = referenceHeight / (double)targetView.getHeight();
@@ -158,12 +160,14 @@ public class RelativeTouchContext implements TouchContext {
         if (isNewFinger) {
             maxPointerCountInGesture = pointerCount;
             originalTouchTime = eventTime;
-            cancelled = confirmedDrag = confirmedMove = confirmedScroll = false;
+            cancelled = confirmedDrag = confirmedMove = confirmedScroll = confirmedLongPress = hasMultiTouch = false;
             distanceMoved = 0;
 
-            if (actionIndex == 0) {
-                // Start the timer for engaging a drag
-                startDragTimer();
+            if (actionIndex == 0 && isTap(lastCursorLocationX, lastCursorLocationY, eventTime)) {
+                touchOnCursor = true;
+                startLongPressTimer();
+            } else {
+                touchOnCursor = false;
             }
         }
 
@@ -173,21 +177,20 @@ public class RelativeTouchContext implements TouchContext {
     @Override
     public void touchUpEvent(int eventX, int eventY, long eventTime)
     {
+        Log.d("TAG", "touchUpEvent() called with: eventX = [" + eventX + "], eventY = [" + eventY + "], eventTime = [" + eventTime + "]");
         if (cancelled) {
             return;
         }
 
-        // Cancel the drag timer
-        cancelDragTimer();
+        cancelLongPressTimer();
 
         byte buttonIndex = getMouseButtonIndex();
 
         if (confirmedDrag) {
             // Raise the button after a drag
             conn.sendMouseButtonUp(buttonIndex);
-        }
-        else if (isTap(eventTime))
-        {
+        } else if (isTap(lastCursorLocationX, lastCursorLocationY, eventTime)
+                || actionIndex == 1 && isTap(lastTouchX, lastTouchY, eventTime)) {
             // Lower the mouse button
             conn.sendMouseButtonDown(buttonIndex);
 
@@ -196,16 +199,18 @@ public class RelativeTouchContext implements TouchContext {
             Runnable buttonUpRunnable = buttonUpRunnables[buttonIndex - 1];
             handler.removeCallbacks(buttonUpRunnable);
             handler.postDelayed(buttonUpRunnable, 100);
+        } else if (!confirmedScroll && !hasMultiTouch) {
+            updatePosition(eventX, eventY);
         }
     }
 
-    private void startDragTimer() {
-        cancelDragTimer();
-        handler.postDelayed(dragTimerRunnable, DRAG_TIME_THRESHOLD);
+    private void startLongPressTimer() {
+        cancelLongPressTimer();
+        handler.postDelayed(longPressRunnable, LONG_PRESS_TIME_THRESHOLD);
     }
 
-    private void cancelDragTimer() {
-        handler.removeCallbacks(dragTimerRunnable);
+    private void cancelLongPressTimer() {
+        handler.removeCallbacks(longPressRunnable);
     }
 
     private void checkForConfirmedMove(int eventX, int eventY) {
@@ -217,17 +222,25 @@ public class RelativeTouchContext implements TouchContext {
         // If it leaves the tap bounds before the drag time expires, it's a move.
         if (!isWithinTapBounds(eventX, eventY)) {
             confirmedMove = true;
-            cancelDragTimer();
-            return;
         }
 
         // Check if we've exceeded the maximum distance moved
         distanceMoved += Math.sqrt(Math.pow(eventX - lastTouchX, 2) + Math.pow(eventY - lastTouchY, 2));
         if (distanceMoved >= TAP_DISTANCE_THRESHOLD) {
             confirmedMove = true;
-            cancelDragTimer();
-            return;
         }
+
+        if(confirmedMove) {
+            cancelLongPressTimer();
+            if (touchOnCursor && !confirmedLongPress) {
+                startDrag();
+            }
+        }
+    }
+
+    private void startDrag() {
+        confirmedDrag = true;
+        conn.sendMouseButtonDown(MouseButtonPacket.BUTTON_LEFT);
     }
 
     private void checkForConfirmedScroll() {
@@ -247,6 +260,9 @@ public class RelativeTouchContext implements TouchContext {
         if (eventX != lastTouchX || eventY != lastTouchY)
         {
             checkForConfirmedMove(eventX, eventY);
+            if (!confirmedMove) {
+                return true;
+            }
             checkForConfirmedScroll();
 
             // We only send moves and drags for the primary touch point
@@ -271,16 +287,18 @@ public class RelativeTouchContext implements TouchContext {
                         conn.sendMouseHighResScroll((short)(deltaY * SCROLL_SPEED_FACTOR));
                     }
                 } else {
-                    if (prefConfig.absoluteMouseMode) {
-                        conn.sendMouseMoveAsMousePosition(
-                                (short) deltaX,
-                                (short) deltaY,
-                                (short) targetView.getWidth(),
-                                (short) targetView.getHeight());
-                    }
-                    else {
-                        conn.sendMouseMove((short) deltaX, (short) deltaY);
-                    }
+//                    if (prefConfig.absoluteMouseMode) {
+//                        conn.sendMouseMoveAsMousePosition(
+//                                (short) deltaX,
+//                                (short) deltaY,
+//                                (short) targetView.getWidth(),
+//                                (short) targetView.getHeight());
+//                    }
+//                    else {
+//                        conn.sendMouseMove((short) deltaX, (short) deltaY);
+//                    }
+                    updatePosition(eventX,eventY);
+
                 }
 
                 // If the scaling factor ended up rounding deltas to zero, wait until they are
@@ -302,12 +320,26 @@ public class RelativeTouchContext implements TouchContext {
         return true;
     }
 
+    private void updatePosition(int eventX, int eventY) {
+        // We may get values slightly outside our view region on ACTION_HOVER_ENTER and ACTION_HOVER_EXIT.
+        // Normalize these to the view size. We can't just drop them because we won't always get an event
+        // right at the boundary of the view, so dropping them would result in our cursor never really
+        // reaching the sides of the screen.
+        eventX = Math.min(Math.max(eventX, 0), targetView.getWidth());
+        eventY = Math.min(Math.max(eventY, 0), targetView.getHeight());
+
+        lastCursorLocationX = eventX;
+        lastCursorLocationY = eventY;
+
+        conn.sendMousePosition((short)eventX, (short)eventY, (short)targetView.getWidth(), (short)targetView.getHeight());
+    }
+
     @Override
     public void cancelTouch() {
         cancelled = true;
 
         // Cancel the drag timer
-        cancelDragTimer();
+        cancelLongPressTimer();
 
         // If it was a confirmed drag, we'll need to raise the button now
         if (confirmedDrag) {
@@ -323,7 +355,9 @@ public class RelativeTouchContext implements TouchContext {
     @Override
     public void setPointerCount(int pointerCount) {
         this.pointerCount = pointerCount;
-
+        if (pointerCount > 1) {
+            hasMultiTouch = true;
+        }
         if (pointerCount > maxPointerCountInGesture) {
             maxPointerCountInGesture = pointerCount;
         }
