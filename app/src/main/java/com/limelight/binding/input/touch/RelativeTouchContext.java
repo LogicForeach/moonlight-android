@@ -42,13 +42,14 @@ public class RelativeTouchContext implements TouchContext {
     private final Runnable longPressRunnable = new Runnable() {
         @Override
         public void run() {
-            conn.sendMouseButtonDown(MouseButtonPacket.BUTTON_RIGHT);
-
             confirmedLongPress = true;
+            if (touchOnCursor) {
+                conn.sendMouseButtonDown(MouseButtonPacket.BUTTON_RIGHT);
 
-            Runnable buttonUpRunnable = buttonUpRunnables[MouseButtonPacket.BUTTON_RIGHT - 1];
-            handler.removeCallbacks(buttonUpRunnable);
-            handler.postDelayed(buttonUpRunnable, 100);
+                Runnable buttonUpRunnable = buttonUpRunnables[MouseButtonPacket.BUTTON_RIGHT - 1];
+                handler.removeCallbacks(buttonUpRunnable);
+                handler.postDelayed(buttonUpRunnable, 100);
+            }
         }
     };
 
@@ -163,9 +164,9 @@ public class RelativeTouchContext implements TouchContext {
             cancelled = confirmedDrag = confirmedMove = confirmedScroll = confirmedLongPress = hasMultiTouch = false;
             distanceMoved = 0;
 
+            startLongPressTimer();
             if (actionIndex == 0 && isTap(lastCursorLocationX, lastCursorLocationY, eventTime)) {
                 touchOnCursor = true;
-                startLongPressTimer();
             } else {
                 touchOnCursor = false;
             }
@@ -199,7 +200,7 @@ public class RelativeTouchContext implements TouchContext {
             Runnable buttonUpRunnable = buttonUpRunnables[buttonIndex - 1];
             handler.removeCallbacks(buttonUpRunnable);
             handler.postDelayed(buttonUpRunnable, 100);
-        } else if (!confirmedScroll && !hasMultiTouch) {
+        } else if (!confirmedScroll && !hasMultiTouch && !confirmedLongPress && !confirmedDrag) {
             updatePosition(eventX, eventY);
         }
     }
@@ -284,21 +285,20 @@ public class RelativeTouchContext implements TouchContext {
 
                 if (pointerCount == 2) {
                     if (confirmedScroll) {
-                        conn.sendMouseHighResScroll((short)(deltaY * SCROLL_SPEED_FACTOR));
+                        conn.sendMouseHighResScroll((short) (deltaY * SCROLL_SPEED_FACTOR));
+                    }
+                } else if (confirmedLongPress) {
+                    if (prefConfig.absoluteMouseMode) {
+                        conn.sendMouseMoveAsMousePosition(
+                                (short) deltaX,
+                                (short) deltaY,
+                                (short) targetView.getWidth(),
+                                (short) targetView.getHeight());
+                    } else {
+                        conn.sendMouseMove((short) deltaX, (short) deltaY);
                     }
                 } else {
-//                    if (prefConfig.absoluteMouseMode) {
-//                        conn.sendMouseMoveAsMousePosition(
-//                                (short) deltaX,
-//                                (short) deltaY,
-//                                (short) targetView.getWidth(),
-//                                (short) targetView.getHeight());
-//                    }
-//                    else {
-//                        conn.sendMouseMove((short) deltaX, (short) deltaY);
-//                    }
-                    updatePosition(eventX,eventY);
-
+                    updatePosition(eventX, eventY);
                 }
 
                 // If the scaling factor ended up rounding deltas to zero, wait until they are
