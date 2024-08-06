@@ -17,6 +17,12 @@ public class RelativeTouchContext implements TouchContext {
     private int originalTouchX = 0;
     private int originalTouchY = 0;
     private long originalTouchTime = 0;
+    private int lastTouchDownX = 0;
+    private int lastTouchDownY = 0;
+    private long lastTouchDownTime = 0;
+    private int lastTouchUpX = 0;
+    private int lastTouchUpY = 0;
+    private long lastTouchUpTime = 0;
     private boolean cancelled;
     private boolean confirmedMove;
     private boolean confirmedDrag;
@@ -87,11 +93,14 @@ public class RelativeTouchContext implements TouchContext {
             }
     };
 
-    private static final int TAP_MOVEMENT_THRESHOLD = 50;
-    private static final int TAP_DISTANCE_THRESHOLD = 50;
+    private static final int TAP_MOVEMENT_THRESHOLD = 60;
+    private static final int TAP_DISTANCE_THRESHOLD = 60;
     private static final int TAP_TIME_THRESHOLD = 250;
 
     private static final int SCROLL_SPEED_FACTOR = 1;
+
+    private static final int DOUBLE_TAP_TIME_THRESHOLD = 250;
+    private static final int DOUBLE_TAP_DISTANCE_THRESHOLD = 60;
 
     public RelativeTouchContext(NvConnection conn, int actionIndex,
                                 int referenceWidth, int referenceHeight,
@@ -118,6 +127,10 @@ public class RelativeTouchContext implements TouchContext {
         int yDelta = Math.abs(touchY - originalTouchY);
         return xDelta <= TAP_MOVEMENT_THRESHOLD &&
                 yDelta <= TAP_MOVEMENT_THRESHOLD;
+    }
+
+    private boolean distanceExceeds(int deltaX, int deltaY, double limit) {
+        return Math.sqrt(Math.pow(deltaX, 2) + Math.pow(deltaY, 2)) > limit;
     }
 
     private boolean isTap(int eventX, int eventY, long eventTime)
@@ -155,18 +168,24 @@ public class RelativeTouchContext implements TouchContext {
         xFactor = referenceWidth / (double)targetView.getWidth();
         yFactor = referenceHeight / (double)targetView.getHeight();
 
-        originalTouchX = lastTouchX = eventX;
-        originalTouchY = lastTouchY = eventY;
+        originalTouchX = lastTouchX = lastTouchDownX = eventX;
+        originalTouchY = lastTouchY = lastTouchDownY = eventY;
 
         if (isNewFinger) {
             maxPointerCountInGesture = pointerCount;
-            originalTouchTime = eventTime;
+            originalTouchTime = lastTouchDownTime = eventTime;
             cancelled = confirmedDrag = confirmedMove = confirmedScroll = confirmedLongPress = hasMultiTouch = false;
             distanceMoved = 0;
 
             startLongPressTimer();
             if (actionIndex == 0 && isTap(lastCursorLocationX, lastCursorLocationY, eventTime)) {
                 touchOnCursor = true;
+                // Left button down at original position
+                if (lastTouchDownTime - lastTouchUpTime > DOUBLE_TAP_TIME_THRESHOLD ||
+                        distanceExceeds(lastTouchDownX - lastTouchUpX, lastTouchDownY - lastTouchUpY, DOUBLE_TAP_DISTANCE_THRESHOLD)) {
+                    // Don't reposition for finger down events within the deadzone. This makes double-clicking easier.
+                    updatePosition(lastTouchDownX, lastTouchDownY);
+                }
             } else {
                 touchOnCursor = false;
             }
@@ -203,6 +222,10 @@ public class RelativeTouchContext implements TouchContext {
         } else if (!confirmedScroll && !hasMultiTouch && !confirmedLongPress && !confirmedDrag) {
             updatePosition(eventX, eventY);
         }
+
+        lastTouchUpX = eventX;
+        lastTouchUpY = eventY;
+        lastTouchUpTime = eventTime;
     }
 
     private void startLongPressTimer() {
